@@ -1,0 +1,16 @@
+name: albsl
+# Paths are resolved relative to the repo root by albsl_fusion/data.py
+video_csv_dir:  datasets/processed/core_data/data/csv/videos
+alfabeti_csv:   datasets/processed/core_data/data/csv/alfabeti_keypoints.csv
+part4_csv:      datasets/processed/core_data/video_keypoints.csv
+image_size:     224
+num_letters:    36
+batch_size:     4
+num_workers:    0
+seq_len:        16
+stride:         8
+split:          train
+augment:
+  geometric:    true
+  photometric:  true
+  temporal:     true

@@ -1,0 +1,13 @@
+defaults:
+  - model: paligemma_yolo_fused
+  - training: phase3
+  - data: albsl
+  - hardware: arc140v
+  - _self_
+
+project_name: albsl-fused
+seed: 42
+wandb:
+  enabled: false
+  project: albsl-fused
+  run_name: ${project_name}-${training.phase}

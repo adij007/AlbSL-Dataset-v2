@@ -1,0 +1,18 @@
+phase: 3
+epochs: 20
+optimizer:
+  name: adamw
+  lr: 0.0002
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+warmup_steps: 500
+grad_accum_steps: 8
+grad_clip: 1.0
+loss_weights:
+  ce: 1.0
+  focal: 0.3
+  align: 0.2
+deepspeed:
+  zero_stage: 2
+  offload_optimizer_cpu: true

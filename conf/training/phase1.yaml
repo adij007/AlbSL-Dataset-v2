@@ -1,0 +1,13 @@
+phase: 1
+epochs: 30
+optimizer:
+  name: adamw
+  lr: 0.001
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+warmup_epochs: 3
+loss_weights:
+  ce: 0.0
+  focal: 1.0
+  align: 0.0

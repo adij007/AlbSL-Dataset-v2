@@ -77,7 +77,7 @@ def parse_letter_from_name(name: str) -> str | None:
 
 
 def main() -> None:
-    root = Path("data/csv/videos")
+    root = Path("datasets/processed/core_data/data/csv/videos")
     if not root.exists():
         raise SystemExit(f"Missing folder: {root}")
 
@@ -107,7 +107,9 @@ def main() -> None:
         if per_letter_frames[letter]:
             med = np.median(np.stack(per_letter_frames[letter], axis=0), axis=0).astype(np.float32)
             landmarks[letter] = med.tolist()
-    Path("albsl_landmarks.json").write_text(
+    out_dir = Path("datasets/processed/assets")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "albsl_landmarks.json").write_text(
         json.dumps(landmarks, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
@@ -121,14 +123,22 @@ def main() -> None:
         stack = np.stack(seqs, axis=0)  # [N,20,63]
         mean = np.mean(stack, axis=0).astype(np.float32)
         std = np.std(stack, axis=0).astype(np.float32)
+        # Letter-specific matching sensitivity:
+        # - More template variance => relaxed max_dist.
+        # - Dynamic digraphs generally need stronger motion weighting.
+        global_std = float(np.mean(std))
+        max_dist = float(np.clip(0.10 + 0.90 * global_std, 0.10, 0.22))
+        motion_weight = 0.33 if letter in {"Sh", "Zh", "Xh", "Gj", "Ll", "Nj", "Rr", "Dh", "Th"} else 0.25
         dynamic[letter] = {
             "sequence_len": 20,
             "feature_dim": 63,
             "template": mean.tolist(),
             "std": std.tolist(),
             "num_sequences": int(stack.shape[0]),
+            "max_dist": round(max_dist, 4),
+            "motion_weight": round(float(motion_weight), 3),
         }
-    Path("albsl_dynamic_templates.json").write_text(
+    (out_dir / "albsl_dynamic_templates.json").write_text(
         json.dumps(dynamic, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
@@ -163,11 +173,15 @@ def main() -> None:
             }
         )
 
-    Path("albsl_words_dictionary.json").write_text(
+    (out_dir / "albsl_words_dictionary.json").write_text(
         json.dumps(words_payload, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
-    print("Wrote: albsl_landmarks.json, albsl_dynamic_templates.json, albsl_words_dictionary.json")
+    print(
+        "Wrote: datasets/processed/assets/albsl_landmarks.json, "
+        "datasets/processed/assets/albsl_dynamic_templates.json, "
+        "datasets/processed/assets/albsl_words_dictionary.json"
+    )
 
 
 if __name__ == "__main__":

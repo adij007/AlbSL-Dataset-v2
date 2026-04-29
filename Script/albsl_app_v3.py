@@ -1,8 +1,9 @@
 """
 albsl_app v3: live 63-d landmark sign classifier + optional template fallback.
-Loads the same albsl_landmarks.json (dict of letter -> 21x3) as v2 for fallback.
+Loads the same landmarks JSON (dict of letter -> 21x3) as v2 for fallback.
 
-Requires: train_albsl.py -> albsl_model_final/model_full.pt, mp_models from extract_keypoints_v2.
+Requires: train_albsl.py -> models/trained/albsl_model_final/model_full.pt,
+models/mediapipe/mp_models from extract_keypoints_v2.
 """
 
 from __future__ import annotations
@@ -143,8 +144,8 @@ def _load(ck: Path) -> Tuple[SignLandmarkModel, Dict[str, Any]]:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--landmarks-json", type=Path, default=Path("albsl_landmarks.json"))
-    ap.add_argument("--model", type=Path, default=Path("albsl_model_final/model_full.pt"))
+    ap.add_argument("--landmarks-json", type=Path, default=Path("datasets/processed/assets/albsl_landmarks.json"))
+    ap.add_argument("--model", type=Path, default=Path("models/trained/albsl_model_final/model_full.pt"))
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--min-conf", type=float, default=0.2)
     ap.add_argument("--template-thr", type=float, default=0.2)
@@ -157,7 +158,7 @@ def main() -> None:
         v: k for k, v in (lm.get("label_to_id") or {}).items()
     }
     refs = load_refs(a.landmarks_json)
-    p = ensure_models_local(Path("mp_models"))
+    p = ensure_models_local(Path("models/mediapipe/mp_models"))
     h = HandLandmarker.create_from_options(
         HandLandmarkerOptions(
             base_options=mp_task.BaseOptions(model_asset_path=str(p["hand"])),

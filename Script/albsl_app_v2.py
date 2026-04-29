@@ -37,6 +37,7 @@ Controls inside the video window
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import sys
@@ -44,8 +45,9 @@ import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import cv2
 import h5py
@@ -60,6 +62,11 @@ from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions
 from mediapipe.tasks.python.vision.core.vision_task_running_mode import (
     VisionTaskRunningMode,
 )
+
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from albsl_fusion.model import FusionBatch, build_model
 
 BaseOptions = mp_tasks.BaseOptions
@@ -598,9 +605,24 @@ def _resolve_json_path(path_like: Path) -> Path:
             return cwd_alt
     # Common fallback names for this app.
     if path_like.name.lower() in ("albsl_landmarks", "albsl_landmarks.json"):
-        fallback = Path("albsl_landmarks.json")
+        fallback = Path("datasets/processed/assets/albsl_landmarks.json")
         if fallback.exists():
             return fallback
+    return path_like
+
+
+def _resolve_model_path(path_like: Path) -> Path:
+    """Resolve model path when launching from repo root or Script dir."""
+    if path_like.exists():
+        return path_like
+    # Try one level up when executed from Script/ working directory.
+    parent_alt = Path("..") / path_like
+    if parent_alt.exists():
+        return parent_alt
+    # Try relative to repository root.
+    root_alt = ROOT / path_like
+    if root_alt.exists():
+        return root_alt
     return path_like
 
 
@@ -623,14 +645,14 @@ def _template_match_letter(
     return None, best_dist
 
 
-def _load_dynamic_templates(path: Path) -> Dict[str, np.ndarray]:
+def _load_dynamic_templates(path: Path) -> Dict[str, Dict[str, Any]]:
     if not path.exists():
         return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
-    out: Dict[str, np.ndarray] = {}
+    out: Dict[str, Dict[str, Any]] = {}
     if not isinstance(raw, dict):
         return out
     for letter, payload in raw.items():
@@ -646,7 +668,12 @@ def _load_dynamic_templates(path: Path) -> Dict[str, np.ndarray]:
         except Exception:
             continue
         if arr.ndim == 2 and arr.shape[1] == 63:
-            out[letter] = arr
+            out[letter] = {
+                "template": arr,
+                "sequence_len": int(payload.get("sequence_len", arr.shape[0])),
+                "max_dist": float(payload.get("max_dist", 0.12)),
+                "motion_weight": float(payload.get("motion_weight", 0.25)),
+            }
     return out
 
 
@@ -663,7 +690,7 @@ def _resample_seq(seq: np.ndarray, n: int) -> np.ndarray:
 
 def _dynamic_match_letter(
     feat_history: Deque[np.ndarray],
-    templates: Dict[str, np.ndarray],
+    templates: Dict[str, Dict[str, Any]],
     max_dist: float = 0.12,
 ) -> Tuple[Optional[str], float]:
     if not templates:
@@ -673,7 +700,10 @@ def _dynamic_match_letter(
     best_letter: Optional[str] = None
     best_dist = float("inf")
     hist = np.stack(list(feat_history), axis=0).astype(np.float32)
-    for letter, tmpl in templates.items():
+    for letter, payload in templates.items():
+        tmpl = payload.get("template")
+        if not isinstance(tmpl, np.ndarray) or tmpl.ndim != 2:
+            continue
         t = int(tmpl.shape[0])
         if hist.shape[0] < t:
             chunk = hist
@@ -685,13 +715,131 @@ def _dynamic_match_letter(
         d_dim = min(int(cand.shape[1]), int(tmpl.shape[1]))
         if d_dim <= 0:
             continue
-        d = float(np.mean(np.abs(cand[:, :d_dim] - tmpl[:, :d_dim])))
+        base_dist = float(np.mean(np.abs(cand[:, :d_dim] - tmpl[:, :d_dim])))
+        # Add a weak trajectory term for dynamic signs (motion-sensitive letters).
+        cand_delta = np.diff(cand[:, :d_dim], axis=0)
+        tmpl_delta = np.diff(tmpl[:, :d_dim], axis=0)
+        motion_dist = float(np.mean(np.abs(cand_delta - tmpl_delta))) if cand_delta.size else 0.0
+        weight = float(payload.get("motion_weight", 0.25))
+        d = (1.0 - weight) * base_dist + weight * motion_dist
         if d < best_dist:
             best_dist = d
             best_letter = letter
-    if best_letter is not None and best_dist <= max_dist:
-        return best_letter, best_dist
+    if best_letter is not None:
+        per_letter_max = float(templates[best_letter].get("max_dist", max_dist))
+        if best_dist <= min(max_dist, per_letter_max):
+            return best_letter, best_dist
     return None, best_dist
+
+
+def _suggest_word_from_letters(letter_seq: List[str], words_dict: List[Dict[str, object]]) -> Optional[str]:
+    if not letter_seq or not words_dict:
+        return None
+    best_word: Optional[str] = None
+    best_score = -1.0
+    n = len(letter_seq)
+    for item in words_dict:
+        letters = item.get("letters")
+        word = item.get("word")
+        if not isinstance(letters, list) or not isinstance(word, str):
+            continue
+        target = [str(x) for x in letters]
+        if not target:
+            continue
+        prefix_len = 0
+        for i in range(min(n, len(target))):
+            if letter_seq[i] != target[i]:
+                break
+            prefix_len += 1
+        # prefix quality + mild length penalty for smoother realtime suggestions.
+        score = (prefix_len / max(1, n)) - 0.03 * abs(len(target) - n)
+        if score > best_score and prefix_len > 0:
+            best_score = score
+            best_word = word
+    return best_word
+
+
+def _append_confirmed_coordinates_csv(
+    csv_path: Path,
+    letter: str,
+    xyz_norm: np.ndarray,
+    confidence: float,
+    source: str,
+) -> None:
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    cols = [
+        "timestamp",
+        "label",
+        "confidence",
+        "source",
+        "landmarks_63",
+    ] + [f"lm{i}_{ax}" for i in range(21) for ax in ("x", "y", "z")]
+    row = {
+        "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "label": letter,
+        "confidence": round(float(confidence), 6),
+        "source": source,
+        "landmarks_63": json.dumps(xyz_norm.reshape(-1).astype(np.float32).tolist(), ensure_ascii=False),
+    }
+    flat = xyz_norm.reshape(-1)
+    for i in range(21):
+        base = i * 3
+        row[f"lm{i}_x"] = round(float(flat[base + 0]), 6)
+        row[f"lm{i}_y"] = round(float(flat[base + 1]), 6)
+        row[f"lm{i}_z"] = round(float(flat[base + 2]), 6)
+    write_header = not csv_path.exists() or csv_path.stat().st_size == 0
+    with csv_path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=cols)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _auto_append_letter(
+    stable_state: Dict[str, object],
+    candidate: Optional[str],
+    confidence: float,
+    threshold: float,
+    repeat_cooldown_ms: int,
+    now_ms: int,
+) -> Optional[str]:
+    if candidate is None or confidence < threshold:
+        stable_state["candidate"] = None
+        stable_state["count"] = 0
+        return None
+    prev = stable_state.get("candidate")
+    if prev == candidate:
+        stable_state["count"] = int(stable_state.get("count", 0)) + 1
+    else:
+        stable_state["candidate"] = candidate
+        stable_state["count"] = 1
+    hold_frames = int(stable_state.get("hold_frames", 6))
+    if int(stable_state.get("count", 0)) < hold_frames:
+        return None
+    last_letter = str(stable_state.get("last_emit_letter", ""))
+    last_ms = int(stable_state.get("last_emit_ms", -10**9))
+    if last_letter == candidate and (now_ms - last_ms) < repeat_cooldown_ms:
+        return None
+    stable_state["last_emit_letter"] = candidate
+    stable_state["last_emit_ms"] = now_ms
+    stable_state["count"] = 0
+    return candidate
+
+
+def _dynamic_letter_set(templates: Dict[str, Dict[str, Any]]) -> set[str]:
+    return {k for k in templates.keys()}
+
+
+def _match_word_from_letters(letter_seq: List[str], words_dict: List[Dict[str, object]]) -> Optional[str]:
+    if not letter_seq:
+        return None
+    for item in words_dict:
+        letters = item.get("letters")
+        word = item.get("word")
+        if isinstance(letters, list) and isinstance(word, str):
+            if [str(x) for x in letters] == letter_seq:
+                return word
+    return _suggest_word_from_letters(letter_seq, words_dict)
 
 
 def _load_words_dictionary(path: Path) -> List[Dict[str, object]]:
@@ -708,21 +856,9 @@ def _load_words_dictionary(path: Path) -> List[Dict[str, object]]:
     return []
 
 
-def _match_word_from_letters(letter_seq: List[str], words_dict: List[Dict[str, object]]) -> Optional[str]:
-    if not letter_seq:
-        return None
-    for item in words_dict:
-        letters = item.get("letters")
-        word = item.get("word")
-        if isinstance(letters, list) and isinstance(word, str):
-            if [str(x) for x in letters] == letter_seq:
-                return word
-    return None
-
-
 def _load_landmark_model_checkpoint(path: Path, device: torch.device) -> Tuple[Optional[torch.nn.Module], Optional[Dict[str, Any]]]:
     """
-    Load model exported by train_albsl.py -> albsl_model_final/model_full.pt.
+    Load model exported by train_albsl.py -> models/trained/albsl_model_final/model_full.pt.
     Returns (model, lmap_payload) or (None, None) on failure.
     """
     if not path.exists():
@@ -746,6 +882,9 @@ def _load_landmark_model_checkpoint(path: Path, device: torch.device) -> Tuple[O
 
 
 def cmd_live(args: argparse.Namespace) -> None:
+    args.weights = _resolve_model_path(args.weights)
+    args.fused_weights = _resolve_model_path(args.fused_weights)
+    args.albsl_model = _resolve_model_path(args.albsl_model)
     device = torch.device("xpu") if hasattr(torch, "xpu") and torch.xpu.is_available() else torch.device("cpu")
     model = LetterMLP().to(device)
     loaded = False
@@ -840,6 +979,14 @@ def cmd_live(args: argparse.Namespace) -> None:
     prev_center: Optional[np.ndarray] = None
     recent_top1: Deque[Tuple[str, float]] = deque(maxlen=7)  # (letter, prob)
     feat_history: Deque[np.ndarray] = deque(maxlen=24)
+    auto_state: Dict[str, object] = {
+        "candidate": None,
+        "count": 0,
+        "hold_frames": max(2, int(args.auto_hold_frames)),
+        "last_emit_letter": "",
+        "last_emit_ms": -10**9,
+    }
+    dynamic_letters = _dynamic_letter_set(dynamic_templates)
 
     try:
         while True:
@@ -986,7 +1133,7 @@ def cmd_live(args: argparse.Namespace) -> None:
                         rest = [x for x in top3 if x[0] != fb_letter]
                         top3 = [(fb_letter, fb_conf)] + rest[:2]
 
-                # If still uncertain, try dynamic motion templates (Sh/Zh/...)
+                # If still uncertain, try dynamic motion templates (Sh/Zh/...).
                 if (not top3) or (top3 and top3[0][1] < 0.75):
                     dyn_letter, dyn_dist = _dynamic_match_letter(
                         feat_history, dynamic_templates, max_dist=args.dynamic_max_dist
@@ -995,6 +1142,20 @@ def cmd_live(args: argparse.Namespace) -> None:
                         dyn_conf = float(max(0.58, min(0.90, 1.0 - dyn_dist)))
                         rest = [x for x in top3 if x[0] != dyn_letter]
                         top3 = [(dyn_letter, dyn_conf)] + rest[:2]
+                # For dynamic letters, allow a slightly lower auto-append gate.
+                if args.auto_append and top3:
+                    cand, conf = top3[0]
+                    th = args.auto_min_conf_dynamic if cand in dynamic_letters else args.auto_min_conf
+                    auto_letter = _auto_append_letter(
+                        auto_state,
+                        candidate=cand,
+                        confidence=conf,
+                        threshold=th,
+                        repeat_cooldown_ms=int(args.auto_repeat_cooldown_ms),
+                        now_ms=ts_ms,
+                    )
+                    if auto_letter is not None:
+                        word_buffer.append(auto_letter)
             else:
                 # Decay prediction memory quickly when no hand is detected.
                 if ema_probs is not None:
@@ -1003,6 +1164,8 @@ def cmd_live(args: argparse.Namespace) -> None:
                     recent_top1.clear()
                 if len(feat_history) > 0:
                     feat_history.clear()
+                auto_state["candidate"] = None
+                auto_state["count"] = 0
 
             # --- Draw skeleton overlay (all detected hands) -----------------
             pts_px: List[Tuple[int, int]] = []
@@ -1073,6 +1236,10 @@ def cmd_live(args: argparse.Namespace) -> None:
                 (255, 255, 255),
                 scale=0.8,
             )
+            if args.auto_append:
+                suggestion = _suggest_word_from_letters(word_buffer, words_dict)
+                if suggestion:
+                    _put_text(frame, f"suggest={suggestion}", (10, H - 84), (180, 220, 255), scale=0.6)
 
             cv2.imshow("AlbSL Live v2", frame)
 
@@ -1095,6 +1262,17 @@ def cmd_live(args: argparse.Namespace) -> None:
             elif key == 32:  # SPACE
                 if top3 and top3[0][1] >= 0.75:
                     word_buffer.append(top3[0][0])
+            elif key == ord("y"):  # confirm prediction -> append coordinates to CSV
+                if detected and top3 and top3[0][1] >= args.confirm_min_conf:
+                    live_xyz = canonical_normalize_hand(xyz, is_left=is_left)
+                    _append_confirmed_coordinates_csv(
+                        args.confirmed_csv,
+                        letter=top3[0][0],
+                        xyz_norm=live_xyz,
+                        confidence=top3[0][1],
+                        source="albsl_app_v2_live_confirm",
+                    )
+                    logger.info("confirmed {} -> {}", top3[0][0], args.confirmed_csv)
             elif key == 8:  # BACKSPACE
                 if word_buffer:
                     word_buffer.pop()
@@ -1134,13 +1312,13 @@ def parse_args() -> argparse.Namespace:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("diagnose", help="Analyze training data sources")
-    d.add_argument("--keypoints-dir", type=Path, default=Path("data/keypoints"))
-    d.add_argument("--alfabeti-h5", type=Path, default=Path("data/alfabeti_keypoints.h5"))
+    d.add_argument("--keypoints-dir", type=Path, default=Path("datasets/processed/core_data/data/keypoints"))
+    d.add_argument("--alfabeti-h5", type=Path, default=Path("datasets/processed/core_data/data/alfabeti_keypoints.h5"))
     d.add_argument("--legacy-h5", type=Path, default=Path("keypoints.h5"))
 
     t = sub.add_parser("train", help="Train MLP classifier")
-    t.add_argument("--keypoints-dir", type=Path, default=Path("data/keypoints"))
-    t.add_argument("--alfabeti-h5", type=Path, default=Path("data/alfabeti_keypoints.h5"))
+    t.add_argument("--keypoints-dir", type=Path, default=Path("datasets/processed/core_data/data/keypoints"))
+    t.add_argument("--alfabeti-h5", type=Path, default=Path("datasets/processed/core_data/data/alfabeti_keypoints.h5"))
     t.add_argument("--legacy-h5", type=Path, default=Path("keypoints.h5"))
     t.add_argument("--out", type=Path, default=Path("outputs/albsl_mlp.pt"))
     t.add_argument("--epochs", type=int, default=50)
@@ -1150,15 +1328,22 @@ def parse_args() -> argparse.Namespace:
     l = sub.add_parser("live", help="Run live recognition + recording app")
     l.add_argument("--weights", type=Path, default=Path("outputs/albsl_mlp.pt"))
     l.add_argument("--fused-weights", type=Path, default=Path("outputs/fused_phase3.pt"))
-    l.add_argument("--albsl-model", type=Path, default=Path("albsl_model_final/model_full.pt"))
-    l.add_argument("--models-dir", type=Path, default=Path("mp_models"))
+    l.add_argument("--albsl-model", type=Path, default=Path("models/trained/albsl_model_final/model_full.pt"))
+    l.add_argument("--models-dir", type=Path, default=Path("models/mediapipe/mp_models"))
     l.add_argument("--camera", type=int, default=0)
     l.add_argument("--recordings-h5", type=Path, default=Path("keypoints.h5"))
-    l.add_argument("--landmarks-json", type=Path, default=Path("albsl_landmarks.json"))
-    l.add_argument("--dynamic-templates-json", type=Path, default=Path("albsl_dynamic_templates.json"))
-    l.add_argument("--words-dict-json", type=Path, default=Path("albsl_words_dictionary.json"))
+    l.add_argument("--landmarks-json", type=Path, default=Path("datasets/processed/assets/albsl_landmarks.json"))
+    l.add_argument("--dynamic-templates-json", type=Path, default=Path("datasets/processed/assets/albsl_dynamic_templates.json"))
+    l.add_argument("--words-dict-json", type=Path, default=Path("datasets/processed/assets/albsl_words_dictionary.json"))
     l.add_argument("--template-max-dist", type=float, default=0.16)
     l.add_argument("--dynamic-max-dist", type=float, default=0.12)
+    l.add_argument("--confirmed-csv", type=Path, default=Path("datasets/processed/core_data/data/csv/confirmed_labels.csv"))
+    l.add_argument("--confirm-min-conf", type=float, default=0.72)
+    l.add_argument("--auto-append", action="store_true")
+    l.add_argument("--auto-hold-frames", type=int, default=7)
+    l.add_argument("--auto-min-conf", type=float, default=0.78)
+    l.add_argument("--auto-min-conf-dynamic", type=float, default=0.72)
+    l.add_argument("--auto-repeat-cooldown-ms", type=int, default=900)
 
     return ap.parse_args()
 

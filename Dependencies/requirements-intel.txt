@@ -1,0 +1,43 @@
+setuptools<82
+intel-extension-for-pytorch; platform_system != "Windows"
+openvino
+openvino-dev[onnx,pytorch]
+onnxruntime-openvino
+mediapipe
+ultralytics
+timm
+numpy
+scipy
+kornia
+filterpy
+scikit-learn
+sympy
+decord
+vidgear
+imageio[ffmpeg]
+opencv-python-headless
+ffmpeg-python
+loguru
+rich
+pytest
+h5py
+pandas
+matplotlib
+albumentations
+hydra-core
+omegaconf
+accelerate
+transformers>=4.41.0
+peft
+trl
+datasets
+einops
+supervision
+wandb
+deepspeed; platform_system != "Windows"
+torch-geometric
+x-transformers
+# Optional: mmpose / mmdet require chumpy which no longer builds on Python 3.12.
+# Install manually on Linux if you need MMCV-based backbones:
+# mmpose
+# mmdet

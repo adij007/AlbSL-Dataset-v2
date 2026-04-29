@@ -5,8 +5,8 @@ Scans a data root (default: ./data), parses supported formats, harmonizes
 schemas, deduplicates, stratify-splits 80/10/10, writes Parquet + reports.
 
 Run:
-  python consolidate_data.py
-  python consolidate_data.py --data-root D:/AlbSL-Dataset-v2/data --out-dir albsl_dataset_v2
+  python Script/consolidate_data.py
+  python Script/consolidate_data.py --data-root datasets/processed/core_data/data --out-dir datasets/processed/consolidated/albsl_dataset_v2
 """
 
 from __future__ import annotations
@@ -170,6 +170,111 @@ def _rows_from_alfabeti_csv(path: Path) -> Iterator[Row]:
         )
 
 
+def _rows_from_part4_csv(path: Path) -> Iterator[Row]:
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return
+    needed_right = [f"right_lm{i}_{ax}_norm" for i in range(21) for ax in ("x", "y", "z")]
+    needed_left = [f"left_lm{i}_{ax}_norm" for i in range(21) for ax in ("x", "y", "z")]
+    has_right = all(c in df.columns for c in needed_right)
+    has_left = all(c in df.columns for c in needed_left)
+    if not (has_right or has_left):
+        return
+    for _, r in df.iterrows():
+        letter = _normalize_letter(r.get("letter", r.get("label", "")))
+        if letter is None:
+            continue
+        # Prefer right hand if detected, else left hand.
+        use_right = bool(r.get("hand_detected_right", False)) and has_right
+        use_left = bool(r.get("hand_detected_left", False)) and has_left
+        if use_right:
+            vals = [float(r[c]) for c in needed_right]
+        elif use_left:
+            vals = [float(r[c]) for c in needed_left]
+        elif has_right:
+            vals = [float(r[c]) for c in needed_right]
+        elif has_left:
+            vals = [float(r[c]) for c in needed_left]
+        else:
+            continue
+        arr = np.array(vals, dtype=np.float32).reshape(21, 3)
+        if not np.isfinite(arr).all():
+            continue
+        yield Row(
+            label=letter,
+            landmarks=arr,
+            session_id=str(r.get("video_file", "")),
+            timestamp=str(r.get("timestamp_ms", "")),
+            source_file=str(path.as_posix()),
+            source_type="part4_csv",
+        )
+
+
+def _rows_from_confirmed_csv(path: Path) -> Iterator[Row]:
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return
+    # Primary schema from albsl_app_v2 confirmed logging.
+    lm_cols = [f"lm{i}_{ax}" for i in range(21) for ax in ("x", "y", "z")]
+    has_flat_cols = all(c in df.columns for c in lm_cols)
+    for _, r in df.iterrows():
+        letter = _normalize_letter(r.get("label", r.get("letter", "")))
+        if letter is None:
+            continue
+        arr: Optional[np.ndarray] = None
+        if has_flat_cols:
+            try:
+                arr = np.array([float(r[c]) for c in lm_cols], dtype=np.float32).reshape(21, 3)
+            except Exception:
+                arr = None
+        if arr is None and "landmarks_63" in r.index:
+            try:
+                vals = json.loads(str(r["landmarks_63"]))
+                arr = np.array(vals, dtype=np.float32).reshape(21, 3)
+            except Exception:
+                arr = None
+        if arr is None or arr.shape != (21, 3) or not np.isfinite(arr).all():
+            continue
+        yield Row(
+            label=letter,
+            landmarks=arr,
+            timestamp=str(r.get("timestamp", "")),
+            source_file=str(path.as_posix()),
+            source_type="confirmed_csv",
+        )
+
+
+def _rows_from_coordinates_csv(path: Path) -> Iterator[Row]:
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return
+    lm_cols = [f"lm{i}_{ax}" for i in range(21) for ax in ("x", "y", "z")]
+    if not all(c in df.columns for c in lm_cols):
+        return
+    label_col = "label" if "label" in df.columns else ("letter" if "letter" in df.columns else None)
+    if label_col is None:
+        return
+    for _, r in df.iterrows():
+        letter = _normalize_letter(r.get(label_col, ""))
+        if letter is None:
+            continue
+        try:
+            arr = np.array([float(r[c]) for c in lm_cols], dtype=np.float32).reshape(21, 3)
+        except Exception:
+            continue
+        if not np.isfinite(arr).all():
+            continue
+        yield Row(
+            label=letter,
+            landmarks=arr,
+            source_file=str(path.as_posix()),
+            source_type="coordinates_csv",
+        )
+
+
 def _rows_from_npz(path: Path) -> Iterator[Row]:
     m = re.match(r"^(\d+)_(.+)\.npz$", path.name, re.IGNORECASE)
     if not m:
@@ -310,6 +415,14 @@ def _scan_data_root(root: Path) -> List[Row]:
         if p.suffix.lower() == ".csv":
             if p.parent.name == "videos" and re.match(r"^\d+_.+\.csv$", p.name):
                 rows.extend(_rows_from_video_csv(p))
+            elif p.name == "video_keypoints.csv":
+                rows.extend(_rows_from_part4_csv(p))
+            elif p.name == "coordinates.csv":
+                rows.extend(_rows_from_coordinates_csv(p))
+            elif p.name == "confirmed_labels.csv" or "confirmed" in p.name.lower():
+                rows.extend(_rows_from_confirmed_csv(p))
+            elif p.name == "external_normalized.csv":
+                rows.extend(_rows_from_confirmed_csv(p))
             elif p.name == "alfabeti_keypoints.csv" or "alfabeti" in p.name:
                 rows.extend(_rows_from_alfabeti_csv(p))
         elif p.suffix.lower() == ".npz":
@@ -520,6 +633,24 @@ def consolidate(data_root: Path, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Scanning {data_root} ...", file=sys.stderr)
     rows = _scan_data_root(data_root)
+    # Include common sibling outputs that may sit outside --data-root.
+    sibling_core = data_root.parent if data_root.name == "data" else data_root
+    extra_csvs = [
+        sibling_core / "video_keypoints.csv",
+        sibling_core / "data" / "csv" / "coordinates.csv",
+        sibling_core / "coordinates.csv",
+        sibling_core / "data" / "csv" / "confirmed_labels.csv",
+        sibling_core / "confirmed_labels.csv",
+        Path("datasets/processed/external/external_normalized.csv"),
+    ]
+    for p in extra_csvs:
+        if p.exists():
+            if p.name == "video_keypoints.csv":
+                rows.extend(list(_rows_from_part4_csv(p)))
+            elif p.name == "coordinates.csv":
+                rows.extend(list(_rows_from_coordinates_csv(p)))
+            else:
+                rows.extend(list(_rows_from_confirmed_csv(p)))
     n_before = len(rows)
     rows, n_drop = _deduplicate(rows)
     n_after = len(rows)
@@ -569,11 +700,16 @@ def consolidate(data_root: Path, out_dir: Path) -> None:
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data-root", type=Path, default=Path("data"), help="Root to scan (recursive)")
+    ap.add_argument(
+        "--data-root",
+        type=Path,
+        default=Path("datasets/processed/core_data/data"),
+        help="Root to scan (recursive)",
+    )
     ap.add_argument(
         "--out-dir",
         type=Path,
-        default=Path("albsl_dataset_v2"),
+        default=Path("datasets/processed/consolidated/albsl_dataset_v2"),
         help="Output directory for parquet and reports",
     )
     return ap.parse_args()

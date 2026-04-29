@@ -538,7 +538,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Intel Arc keypoint extractor")
     parser.add_argument("--input", type=Path, required=True, help="Input clip or folder")
     parser.add_argument("--output", type=Path, required=True, help="Output clip npz or folder")
-    parser.add_argument("--models-dir", type=Path, default=Path("mp_models"))
+    parser.add_argument("--models-dir", type=Path, default=Path("models/mediapipe/mp_models"))
     parser.add_argument("--segments", action="store_true", help="Process 36 segmented clips")
     parser.add_argument("--prefer-cpu", action="store_true")
     parser.add_argument("--num-hands", type=int, default=2, help="Detect up to N hands per frame")

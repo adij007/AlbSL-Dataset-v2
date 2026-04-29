@@ -1,0 +1,19 @@
+name: paligemma_yolo_fused
+hidden_dim: 1152
+vision_tokens: 196
+keypoint_feature_dim: 123
+bridge:
+  roi_output_size: 7
+  num_classes: 4
+  sign_cls_token: true
+fusion:
+  num_heads: 4
+  dropout: 0.1
+lora:
+  vision_rank: 16
+  decoder_rank: 32
+  alpha: 32
+  dropout: 0.05
+freeze:
+  yolo_backbone: true
+  yolo_head: true

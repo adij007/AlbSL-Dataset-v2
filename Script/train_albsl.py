@@ -20,8 +20,8 @@ Other GPU optimisations
 • non_blocking=True transfers                     →  overlaps H→D copy with compute
 • Gradient clipping  (max_norm=1.0)               →  stabilises mixed-precision
 
-Input : albsl_dataset_v2/{train,val}.parquet  +  label_map.json
-Logs  : training_log.jsonl, convergence_log.jsonl
+Input : datasets/processed/consolidated/albsl_dataset_v2/{train,val}.parquet + label_map.json
+Logs  : Log/training_log.jsonl, Log/convergence_log.jsonl
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from torch.utils.data import DataLoader, Dataset
 MAX_ROUNDS: int           = 6
 MAX_EPOCHS_PER_ROUND: int = 4
 THRESHOLD: float          = 0.80
-CHECKPOINT_DIR: str       = "checkpoints/"
+CHECKPOINT_DIR: str       = "models/trained/checkpoints/"
 
 BATCH_SIZE: int           = 128
 GRAD_ACCUM: int           = 1
@@ -62,10 +62,10 @@ AUG_SCALE_MAX: float      = 1.05
 HARD_CLASS_LOSS_MULT: float = 2.0
 
 RANDOM_SEED: int          = 42
-DATASET_DIR               = Path("albsl_dataset_v2")
-TRAINING_LOG              = Path("training_log.jsonl")
-CONVERGENCE_LOG           = Path("convergence_log.jsonl")
-EXPORT_DIR                = Path("albsl_model_final")
+DATASET_DIR               = Path("datasets/processed/consolidated/albsl_dataset_v2")
+TRAINING_LOG              = Path("Log/training_log.jsonl")
+CONVERGENCE_LOG           = Path("Log/convergence_log.jsonl")
+EXPORT_DIR                = Path("models/trained/albsl_model_final")
 
 BERT_HIDDEN: int  = 128
 BERT_LAYERS: int  = 1
@@ -717,7 +717,7 @@ def main() -> None:
         print("AMP    : disabled (CPU run — consider --backend directml)", file=sys.stderr)
 
     if not a.data_dir.is_dir():
-        print("Missing dataset — run: python consolidate_data.py", file=sys.stderr)
+        print("Missing dataset — run: python Script/consolidate_data.py", file=sys.stderr)
         sys.exit(1)
 
     train = pd.read_parquet(a.data_dir / "train.parquet")

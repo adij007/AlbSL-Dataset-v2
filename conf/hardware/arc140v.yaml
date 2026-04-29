@@ -1,0 +1,5 @@
+device: xpu
+dtype: bfloat16
+cpu_fallback: true
+vram_limit_gb: 16
+deepspeed_config: conf/hardware/deepspeed_zero2.json
