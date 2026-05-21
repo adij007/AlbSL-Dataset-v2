@@ -1,0 +1,220 @@
+{
+  "per_letter": {
+    "A": {
+      "frames": 442.0,
+      "mean_confidence": 0.4492928087711334,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 54.52488687782805
+    },
+    "B": {
+      "frames": 574.0,
+      "mean_confidence": 0.32507169246673584,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 66.72473867595818
+    },
+    "C": {
+      "frames": 560.0,
+      "mean_confidence": 0.3275033235549927,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 66.60714285714285
+    },
+    "Ç": {
+      "frames": 546.0,
+      "mean_confidence": 0.3389236629009247,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 65.38461538461539
+    },
+    "D": {
+      "frames": 536.0,
+      "mean_confidence": 0.3128407299518585,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 67.91044776119402
+    },
+    "Dh": {
+      "frames": 520.0,
+      "mean_confidence": 0.339682012796402,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 65.1923076923077
+    },
+    "E": {
+      "frames": 504.0,
+      "mean_confidence": 0.3153809905052185,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 67.85714285714286
+    },
+    "Ë": {
+      "frames": 488.0,
+      "mean_confidence": 0.4297947585582733,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 56.557377049180324
+    },
+    "F": {
+      "frames": 469.0,
+      "mean_confidence": 0.4277278780937195,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 55.863539445628994
+    },
+    "G": {
+      "frames": 453.0,
+      "mean_confidence": 0.4599699079990387,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 52.980132450331126
+    },
+    "Gj": {
+      "frames": 591.0,
+      "mean_confidence": 0.3234739601612091,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 67.17428087986464
+    },
+    "H": {
+      "frames": 577.0,
+      "mean_confidence": 0.5892859697341919,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 40.20797227036395
+    },
+    "I": {
+      "frames": 565.0,
+      "mean_confidence": 0.31467676162719727,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 67.43362831858407
+    },
+    "J": {
+      "frames": 554.0,
+      "mean_confidence": 0.5432519912719727,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 44.22382671480145
+    },
+    "K": {
+      "frames": 541.0,
+      "mean_confidence": 0.5372408032417297,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 44.91682070240296
+    },
+    "L": {
+      "frames": 528.0,
+      "mean_confidence": 0.35473236441612244,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 63.06818181818182
+    },
+    "Ll": {
+      "frames": 513.0,
+      "mean_confidence": 0.44982701539993286,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 51.85185185185185
+    },
+    "M": {
+      "frames": 498.0,
+      "mean_confidence": 0.33583304286003113,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 65.66265060240963
+    },
+    "N": {
+      "frames": 483.0,
+      "mean_confidence": 0.5054714679718018,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 48.24016563146998
+    },
+    "Nj": {
+      "frames": 469.0,
+      "mean_confidence": 0.40661582350730896,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 58.84861407249466
+    },
+    "O": {
+      "frames": 455.0,
+      "mean_confidence": 0.4163476526737213,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 57.802197802197796
+    },
+    "P": {
+      "frames": 591.0,
+      "mean_confidence": 0.25203853845596313,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 74.11167512690355
+    },
+    "Q": {
+      "frames": 578.0,
+      "mean_confidence": 0.5258793234825134,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 46.88581314878893
+    },
+    "R": {
+      "frames": 564.0,
+      "mean_confidence": 0.3923247456550598,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 60.28368794326241
+    },
+    "Rr": {
+      "frames": 548.0,
+      "mean_confidence": 0.3572502136230469,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 63.503649635036496
+    },
+    "S": {
+      "frames": 535.0,
+      "mean_confidence": 0.3805566132068634,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 61.49532710280374
+    },
+    "Sh": {
+      "frames": 521.0,
+      "mean_confidence": 0.43491676449775696,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 55.66218809980806
+    },
+    "T": {
+      "frames": 508.0,
+      "mean_confidence": 0.42909476161003113,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 56.496062992125985
+    },
+    "Th": {
+      "frames": 494.0,
+      "mean_confidence": 0.39506131410598755,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 59.716599190283404
+    },
+    "U": {
+      "frames": 479.0,
+      "mean_confidence": 0.3560548722743988,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 63.88308977035491
+    },
+    "V": {
+      "frames": 463.0,
+      "mean_confidence": 0.5148271918296814,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 47.94816414686825
+    },
+    "X": {
+      "frames": 451.0,
+      "mean_confidence": 0.537960410118103,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 45.67627494456763
+    },
+    "Xh": {
+      "frames": 590.0,
+      "mean_confidence": 0.30042389035224915,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 69.32203389830508
+    },
+    "Y": {
+      "frames": 579.0,
+      "mean_confidence": 0.3656899333000183,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 62.69430051813472
+    },
+    "Z": {
+      "frames": 565.0,
+      "mean_confidence": 0.5249784588813782,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 46.72566371681416
+    },
+    "Zh": {
+      "frames": 552.0,
+      "mean_confidence": 0.565499484539032,
+      "min_confidence": 0.0,
+      "occlusion_rate_pct": 42.7536231884058
+    }
+  }
+}

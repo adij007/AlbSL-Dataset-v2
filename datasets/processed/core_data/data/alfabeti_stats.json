@@ -1,0 +1,41 @@
+{
+  "per_letter": {
+    "A": {
+      "samples": 70,
+      "detected": 13,
+      "detection_rate_pct": 18.571428571428573,
+      "mean_confidence": 0.9321140646934509
+    },
+    "B": {
+      "samples": 70,
+      "detected": 65,
+      "detection_rate_pct": 92.85714285714286,
+      "mean_confidence": 0.9877348138735844
+    },
+    "C": {
+      "samples": 70,
+      "detected": 33,
+      "detection_rate_pct": 47.14285714285714,
+      "mean_confidence": 0.943766606576515
+    },
+    "F": {
+      "samples": 70,
+      "detected": 68,
+      "detection_rate_pct": 97.14285714285714,
+      "mean_confidence": 0.9823579174630782
+    },
+    "UNKNOWN": {
+      "samples": 34,
+      "detected": 34,
+      "detection_rate_pct": 100.0,
+      "mean_confidence": 0.9858187121503493
+    }
+  },
+  "global": {
+    "total_samples": 314,
+    "detected_samples": 213,
+    "detection_rate_pct": 67.83439490445859,
+    "unique_letters": 5,
+    "skipped_unparseable": 0
+  }
+}
