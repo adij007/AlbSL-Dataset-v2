@@ -1,0 +1,40 @@
+{
+  "include": ["Script", "web/server", "albsl_fusion"],
+  "exclude": ["**/node_modules", "web/dist", "web/node_modules"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "executionEnvironments": [
+    {
+      "root": "Script",
+      "pythonVersion": "3.12",
+      "extraPaths": ["..", "."],
+      "reportAny": "none",
+      "reportDeprecated": "none",
+      "reportUnusedCallResult": "none",
+      "reportUnknownVariableType": "none",
+      "reportPrivateImportUsage": "none",
+      "reportExplicitAny": "none",
+      "reportUnknownMemberType": "none",
+      "reportUnannotatedClassAttribute": "none",
+      "reportUnusedVariable": "none",
+      "reportMissingTypeStubs": "none",
+      "reportImplicitOverride": "none",
+      "reportUnknownParameterType": "none",
+      "reportUnnecessaryIsInstance": "none",
+      "reportImplicitStringConcatenation": "none",
+      "reportUnreachable": "none",
+      "reportCallInDefaultInitializer": "none",
+      "reportUnusedFunction": "none",
+      "reportUnusedImport": "none",
+      "reportMissingTypeArgument": "none",
+      "reportConstantRedefinition": "none",
+      "reportUnknownArgumentType": "none"
+    },
+    {
+      "root": ".",
+      "pythonVersion": "3.12",
+      "extraPaths": [".", "Script"]
+    }
+  ]
+}

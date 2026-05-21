@@ -31,7 +31,9 @@ import json
 import math
 import os
 import random
+import subprocess
 import sys
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -41,12 +43,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
+from path_utils import repo_root, resolve_repo_path
 
 # ── knobs ──────────────────────────────────────────────────────────────────────
 MAX_ROUNDS: int           = 6
 MAX_EPOCHS_PER_ROUND: int = 4
 THRESHOLD: float          = 0.80
-CHECKPOINT_DIR: str       = "models/trained/checkpoints/"
+_REPO_ROOT = repo_root()
+CHECKPOINT_DIR: str       = str(_REPO_ROOT / "models" / "trained" / "checkpoints") + os.sep
 
 BATCH_SIZE: int           = 128
 GRAD_ACCUM: int           = 1
@@ -62,10 +66,11 @@ AUG_SCALE_MAX: float      = 1.05
 HARD_CLASS_LOSS_MULT: float = 2.0
 
 RANDOM_SEED: int          = 42
-DATASET_DIR               = Path("datasets/processed/consolidated/albsl_dataset_v2")
-TRAINING_LOG              = Path("Log/training_log.jsonl")
-CONVERGENCE_LOG           = Path("Log/convergence_log.jsonl")
-EXPORT_DIR                = Path("models/trained/albsl_model_final")
+DATASET_DIR               = _REPO_ROOT / "datasets" / "processed" / "consolidated" / "albsl_dataset_v2"
+TRAINING_LOG              = _REPO_ROOT / "Log" / "training_log.jsonl"
+CONVERGENCE_LOG           = _REPO_ROOT / "Log" / "convergence_log.jsonl"
+EXPORT_DIR                = _REPO_ROOT / "models" / "trained" / "albsl_model_final"
+RUN_META_PATH             = _REPO_ROOT / "Log" / "run_metadata.json"
 
 BERT_HIDDEN: int  = 128
 BERT_LAYERS: int  = 1
@@ -77,6 +82,8 @@ LORA_DROPOUT: float = 0.05
 # Number of DataLoader worker processes.
 # 0 = main process only (safe on Windows / MPS); auto-detect otherwise.
 NUM_WORKERS: int = min(8, max(0, (os.cpu_count() or 4) - 1))
+
+DEFAULT_VAL_EVERY = 1
 
 
 # ── reproducibility ────────────────────────────────────────────────────────────
@@ -126,6 +133,21 @@ def _try_xpu():
     except Exception:
         pass
     return None
+
+
+def _is_device_removed_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    needles = [
+        "device instance has been suspended",
+        "deviceremovedreason",
+        "device removed",
+        "suspended/removed",
+        "suspended or removed",
+        "dxgi_error_device_removed",
+        "dxgi_error_device_hung",
+        "directml device was suspended",
+    ]
+    return any(n in msg for n in needles)
 
 
 def get_device() -> Tuple[torch.device, str]:
@@ -416,7 +438,16 @@ def train_loop(
     device: torch.device,
     use_4b: bool,
     backend: str = "cpu",
+    val_every: int = DEFAULT_VAL_EVERY,
 ) -> Path:
+    if backend == "directml":
+        print(
+            "DirectML safety mode: reducing batch size/threads for stability.",
+            file=sys.stderr,
+        )
+        global BATCH_SIZE, NUM_WORKERS
+        BATCH_SIZE = min(BATCH_SIZE, 32)
+        NUM_WORKERS = 0
     n_class = int(train["label_id"].max() + 1)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     last_cp = Path(CHECKPOINT_DIR) / "state.pt"
@@ -542,7 +573,14 @@ def train_loop(
                         loss = F.cross_entropy(logits, yb)
 
                 # ── scaled backward ──────────────────────────────────────────
-                scaler.scale(loss / GRAD_ACCUM).backward()
+                try:
+                    scaler.scale(loss / GRAD_ACCUM).backward()
+                except RuntimeError as exc:
+                    if backend == "directml" and _is_device_removed_error(exc):
+                        raise RuntimeError(
+                            "DirectML device was suspended/removed during backward pass."
+                        ) from exc
+                    raise
                 tloss += float(loss.detach())
                 ni    += 1
                 gacc  += 1
@@ -565,22 +603,25 @@ def train_loop(
                 scaler.update()
                 opt.zero_grad()
 
-            # ── per-epoch validation ─────────────────────────────────────────
-            pc_ep = per_class_by_label(m, v_ld, lmap, device)
-            below = [k for k, v in pc_ep.items() if v < THRESHOLD]
-            print(
-                f"  ep {ep+1:02d}  loss {tloss/max(ni,1):.4f}  "
-                f"below={below}",
-                file=sys.stderr,
-            )
-            _append_jsonl(
-                TRAINING_LOG,
-                {
-                    "round": rd, "epoch": ep,
-                    "loss": tloss / max(ni, 1),
-                    "per_class_val": pc_ep,
-                },
-            )
+            run_full_val = ((ep + 1) % max(1, int(val_every)) == 0) or (ep == MAX_EPOCHS_PER_ROUND - 1)
+            log_payload: Dict[str, Any] = {
+                "round": rd,
+                "epoch": ep,
+                "loss": tloss / max(ni, 1),
+            }
+            if run_full_val:
+                pc_ep = per_class_by_label(m, v_ld, lmap, device)
+                below = [k for k, v in pc_ep.items() if v < THRESHOLD]
+                print(
+                    f"  ep {ep+1:02d}  loss {tloss/max(ni,1):.4f}  "
+                    f"below={below}",
+                    file=sys.stderr,
+                )
+                log_payload["per_class_val"] = pc_ep
+            else:
+                print(f"  ep {ep+1:02d}  loss {tloss/max(ni,1):.4f}", file=sys.stderr)
+                log_payload["per_class_val"] = None
+            _append_jsonl(TRAINING_LOG, log_payload)
 
         # ── round-end checkpoint ─────────────────────────────────────────────
         pc_f   = per_class_by_label(m, v_ld, lmap, device)
@@ -619,8 +660,94 @@ def train_loop(
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
-    with open(path, "a", encoding="utf-8") as f:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+
+
+def _file_sha256(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _git_head_commit() -> Optional[str]:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(_REPO_ROOT),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def _write_run_metadata(
+    *,
+    data_dir: Path,
+    backend: str,
+    device: str,
+    use_4b: bool,
+    val_every: int,
+) -> None:
+    payload = {
+        "timestamp": pd.Timestamp.utcnow().isoformat(),
+        "seed": RANDOM_SEED,
+        "backend": backend,
+        "device": device,
+        "use_4bit": bool(use_4b),
+        "val_every": int(val_every),
+        "config": {
+            "max_rounds": MAX_ROUNDS,
+            "epochs_per_round": MAX_EPOCHS_PER_ROUND,
+            "batch_size": BATCH_SIZE,
+            "grad_accum": GRAD_ACCUM,
+            "lr": LEARNING_RATE,
+            "weight_decay": WEIGHT_DECAY,
+            "threshold": THRESHOLD,
+        },
+        "data_hashes": {},
+        "git_commit": _git_head_commit(),
+    }
+    for name in ("train.parquet", "val.parquet", "test.parquet", "label_map.json"):
+        p = data_dir / name
+        if p.exists():
+            payload["data_hashes"][name] = _file_sha256(p)
+    RUN_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUN_META_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _check_class_support(
+    train: pd.DataFrame,
+    val: pd.DataFrame,
+    *,
+    min_train_per_class: int,
+    min_val_per_class: int,
+    strict: bool,
+) -> None:
+    warnings: List[str] = []
+    t_counts = train["label"].value_counts()
+    v_counts = val["label"].value_counts()
+    for cls, cnt in t_counts.items():
+        if int(cnt) < int(min_train_per_class):
+            warnings.append(f"train class '{cls}' has only {int(cnt)} samples")
+    for cls, cnt in v_counts.items():
+        if int(cnt) < int(min_val_per_class):
+            warnings.append(f"val class '{cls}' has only {int(cnt)} samples")
+    if warnings and strict:
+        raise RuntimeError("Class support checks failed: " + "; ".join(warnings))
+    for w in warnings:
+        print(f"Warning: {w}", file=sys.stderr)
 
 
 def _cuda_event_record(device: torch.device) -> Any:
@@ -641,6 +768,23 @@ def _cuda_event_elapsed(start: Any, device: torch.device) -> float:
         return start.elapsed_time(end)   # type: ignore[attr-defined]
     import time
     return (time.perf_counter() - start) * 1000.0
+
+
+def _evaluate_checkpoint(
+    checkpoint: Path,
+    split_df: pd.DataFrame,
+    lmap: Dict[str, Any],
+    device: torch.device,
+    use_4b: bool,
+    backend: str,
+) -> Dict[str, float]:
+    n_class = int(max(lmap.get("label_to_id", {}).values())) + 1
+    m = SignLandmarkModel(n_class, use_4b).to(device)
+    m = m.add_lora().to(device)
+    state = torch.load(str(checkpoint), map_location=device, weights_only=True)
+    m.load_state_dict(state, strict=False)
+    ld = make_loader(split_df, shuffle=False, backend=backend)
+    return per_class_by_label(m, ld, lmap, device)
 
 
 # ── entry point ────────────────────────────────────────────────────────────────
@@ -664,6 +808,10 @@ def main() -> None:
         choices=["cuda", "xpu", "directml", "cpu"],
         help="Force a specific backend instead of auto-detecting"
     )
+    ap.add_argument("--val-every", type=int, default=DEFAULT_VAL_EVERY, help="Run full validation every N epochs.")
+    ap.add_argument("--min-train-per-class", type=int, default=2, help="Warn/fail if train class support is lower.")
+    ap.add_argument("--min-val-per-class", type=int, default=1, help="Warn/fail if val class support is lower.")
+    ap.add_argument("--strict-class-support", action="store_true", help="Fail fast if class support checks fail.")
     a = ap.parse_args()
     NUM_WORKERS = a.workers
 
@@ -716,19 +864,66 @@ def main() -> None:
     else:
         print("AMP    : disabled (CPU run — consider --backend directml)", file=sys.stderr)
 
+    a.data_dir = resolve_repo_path(a.data_dir)
     if not a.data_dir.is_dir():
         print("Missing dataset — run: python Script/consolidate_data.py", file=sys.stderr)
         sys.exit(1)
 
     train = pd.read_parquet(a.data_dir / "train.parquet")
     val   = pd.read_parquet(a.data_dir / "val.parquet")
+    test  = pd.read_parquet(a.data_dir / "test.parquet") if (a.data_dir / "test.parquet").exists() else pd.DataFrame(columns=train.columns)
     with open(a.data_dir / "label_map.json", "r", encoding="utf-8") as f:
         lmap = json.load(f)
+    _check_class_support(
+        train,
+        val,
+        min_train_per_class=int(a.min_train_per_class),
+        min_val_per_class=int(a.min_val_per_class),
+        strict=bool(a.strict_class_support),
+    )
+    _write_run_metadata(
+        data_dir=a.data_dir,
+        backend=backend,
+        device=str(device),
+        use_4b=use_4b,
+        val_every=int(a.val_every),
+    )
 
-    cp = train_loop(train, val, lmap, device, use_4b, backend=backend)
+    try:
+        cp = train_loop(train, val, lmap, device, use_4b, backend=backend, val_every=int(a.val_every))
+    except RuntimeError as exc:
+        # DirectML device resets are common on some iGPU workloads; fail over to CPU.
+        if backend == "directml" and (
+            _is_device_removed_error(exc) or "DirectML device was suspended/removed" in str(exc)
+        ):
+            print(
+                "\nDirectML GPU device was suspended. Falling back to CPU automatically.",
+                file=sys.stderr,
+            )
+            print(traceback.format_exc(), file=sys.stderr)
+            device = torch.device("cpu")
+            backend = "cpu"
+            cp = train_loop(train, val, lmap, device, False, backend=backend)
+        else:
+            raise
 
     if not a.no_export and cp.exists():
         export_final(int(train["label_id"].max() + 1), use_4b, cp, lmap)
+    if cp.exists() and len(test):
+        test_pc = _evaluate_checkpoint(cp, test, lmap, device, use_4b, backend=backend)
+        _append_jsonl(
+            CONVERGENCE_LOG,
+            {
+                "split": "test",
+                "checkpoint": str(cp),
+                "per_class_test_acc": test_pc,
+                "mean_test_acc": float(np.mean(list(test_pc.values()))) if test_pc else 0.0,
+            },
+        )
+        print(
+            f"Held-out test mean acc: {float(np.mean(list(test_pc.values()))) if test_pc else 0.0:.4f}",
+            file=sys.stderr,
+        )
 
     print(f"\nDone.  Checkpoint → {cp}", file=sys.stderr)
     if not a.no_export:

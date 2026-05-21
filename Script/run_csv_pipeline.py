@@ -1,4 +1,4 @@
-"""Run end-to-end CSV pipeline: external import → consolidate → embedding experiment.
+"""Run end-to-end CSV pipeline: external import → merge coordinates → consolidate.
 
 Optional: snapshot CSV inputs under datasets/processed/backups/ (no git changes).
 
@@ -16,7 +16,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from path_utils import repo_root
+
+ROOT = repo_root()
 
 
 def _run(cmd: list[str]) -> None:
@@ -73,19 +75,22 @@ def main() -> None:
     _run(
         [
             py,
-            str(ROOT / "Script" / "consolidate_data.py"),
-            "--data-root",
-            "datasets/processed/core_data/data",
-            "--out-dir",
-            "datasets/processed/consolidated/albsl_dataset_v2",
+            str(ROOT / "Script" / "merge_all_coordinates_csv.py"),
+            "--input-root",
+            "datasets/csv_dataset",
+            "--output-csv",
+            "datasets/processed/core_data/data/csv/coordinates.csv",
         ]
     )
     _run(
         [
             py,
-            str(ROOT / "Script" / "embedding_experiment.py"),
-            "--data-dir",
+            str(ROOT / "Script" / "consolidate_data.py"),
+            "--data-root",
+            "datasets/processed/core_data/data",
+            "--out-dir",
             "datasets/processed/consolidated/albsl_dataset_v2",
+            "--allow-fallback-split",
         ]
     )
     if args.train:

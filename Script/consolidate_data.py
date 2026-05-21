@@ -23,6 +23,8 @@ from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
+from confirmed_csv_io import iter_confirmed_csv_records
+from path_utils import repo_root, resolve_repo_path
 
 # --- Albanian alphabet (same order as rest of project) -----------------------
 ALBANIAN_LETTERS: List[str] = [
@@ -47,6 +49,7 @@ VIDEO_63: List[str] = [f"{n}_{a}" for n in _LM for a in ("x", "y", "z")]
 
 DEDUP_EPS = 1e-4
 RANDOM_SEED = 42
+ROOT = repo_root()
 
 
 # --- snake_case ----------------------------------------------------------------
@@ -69,6 +72,8 @@ class Row:
     timestamp: Optional[str] = None
     source_file: str = ""
     source_type: str = ""
+    confidence: Optional[float] = None
+    occlusion: Optional[float] = None
 
 
 # --- label normalization -------------------------------------------------------
@@ -170,6 +175,18 @@ def _rows_from_alfabeti_csv(path: Path) -> Iterator[Row]:
         )
 
 
+def _to_optional_float(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        fv = float(v)
+        if not np.isfinite(fv):
+            return None
+        return fv
+    except Exception:
+        return None
+
+
 def _rows_from_part4_csv(path: Path) -> Iterator[Row]:
     try:
         df = pd.read_csv(path)
@@ -208,41 +225,26 @@ def _rows_from_part4_csv(path: Path) -> Iterator[Row]:
             timestamp=str(r.get("timestamp_ms", "")),
             source_file=str(path.as_posix()),
             source_type="part4_csv",
+            confidence=_to_optional_float(
+                r.get("hand_conf_right", r.get("hand_conf_left", r.get("confidence", None)))
+            ),
+            occlusion=_to_optional_float(r.get("occlusion", r.get("occlusion_score", None))),
         )
 
 
 def _rows_from_confirmed_csv(path: Path) -> Iterator[Row]:
-    try:
-        df = pd.read_csv(path)
-    except Exception:
-        return
-    # Primary schema from albsl_app_v2 confirmed logging.
-    lm_cols = [f"lm{i}_{ax}" for i in range(21) for ax in ("x", "y", "z")]
-    has_flat_cols = all(c in df.columns for c in lm_cols)
-    for _, r in df.iterrows():
-        letter = _normalize_letter(r.get("label", r.get("letter", "")))
+    for rec in iter_confirmed_csv_records(path):
+        letter = _normalize_letter(rec.label)
         if letter is None:
-            continue
-        arr: Optional[np.ndarray] = None
-        if has_flat_cols:
-            try:
-                arr = np.array([float(r[c]) for c in lm_cols], dtype=np.float32).reshape(21, 3)
-            except Exception:
-                arr = None
-        if arr is None and "landmarks_63" in r.index:
-            try:
-                vals = json.loads(str(r["landmarks_63"]))
-                arr = np.array(vals, dtype=np.float32).reshape(21, 3)
-            except Exception:
-                arr = None
-        if arr is None or arr.shape != (21, 3) or not np.isfinite(arr).all():
             continue
         yield Row(
             label=letter,
-            landmarks=arr,
-            timestamp=str(r.get("timestamp", "")),
-            source_file=str(path.as_posix()),
+            landmarks=rec.landmarks,
+            session_id=rec.session_id,
+            timestamp=rec.timestamp,
+            source_file=rec.source_file or str(path.as_posix()),
             source_type="confirmed_csv",
+            confidence=rec.confidence,
         )
 
 
@@ -272,6 +274,8 @@ def _rows_from_coordinates_csv(path: Path) -> Iterator[Row]:
             landmarks=arr,
             source_file=str(path.as_posix()),
             source_type="coordinates_csv",
+            confidence=_to_optional_float(r.get("confidence", None)),
+            occlusion=_to_optional_float(r.get("occlusion", None)),
         )
 
 
@@ -417,7 +421,7 @@ def _scan_data_root(root: Path) -> List[Row]:
                 rows.extend(_rows_from_video_csv(p))
             elif p.name == "video_keypoints.csv":
                 rows.extend(_rows_from_part4_csv(p))
-            elif p.name == "coordinates.csv":
+            elif p.name in ("coordinates.csv", "coordinates_legacy_subset.csv"):
                 rows.extend(_rows_from_coordinates_csv(p))
             elif p.name == "confirmed_labels.csv" or "confirmed" in p.name.lower():
                 rows.extend(_rows_from_confirmed_csv(p))
@@ -456,6 +460,39 @@ def _deduplicate(rows: List[Row]) -> Tuple[List[Row], int]:
         seen.add(key)
         out.append(r)
     return out, dropped
+
+
+def _quality_filter_rows(
+    rows: List[Row],
+    *,
+    min_confidence: float,
+    max_occlusion: float,
+    min_landmark_completeness: float,
+) -> Tuple[List[Row], Dict[str, int]]:
+    kept: List[Row] = []
+    drops = {
+        "invalid_landmarks": 0,
+        "low_completeness": 0,
+        "low_confidence": 0,
+        "high_occlusion": 0,
+    }
+    for r in rows:
+        arr = np.asarray(r.landmarks, dtype=np.float32)
+        if arr.shape != (21, 3) or not np.isfinite(arr).all():
+            drops["invalid_landmarks"] += 1
+            continue
+        completeness = float(np.isfinite(arr).sum() / arr.size)
+        if completeness < float(min_landmark_completeness):
+            drops["low_completeness"] += 1
+            continue
+        if r.confidence is not None and float(r.confidence) < float(min_confidence):
+            drops["low_confidence"] += 1
+            continue
+        if r.occlusion is not None and float(r.occlusion) > float(max_occlusion):
+            drops["high_occlusion"] += 1
+            continue
+        kept.append(r)
+    return kept, drops
 
 
 # --- stratified split (min per class) ------------------------------------------
@@ -576,6 +613,60 @@ def _safe_stratify(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Dat
     return train, val, test, w
 
 
+# --- strict deterministic split -------------------------------------------------
+def _strict_split(
+    df: pd.DataFrame,
+    *,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, List[str]]:
+    if len(df) < 6:
+        raise RuntimeError("Dataset too small for strict split (need >= 6 rows).")
+    vc = df["label"].value_counts()
+    if int(vc.min()) < 3:
+        small = vc[vc < 3].to_dict()
+        raise RuntimeError(f"Strict split requires >=3 samples per class; got small classes: {small}")
+    rng = np.random.RandomState(RANDOM_SEED)
+    train_idx: List[int] = []
+    val_idx: List[int] = []
+    test_idx: List[int] = []
+    labels_total = set(df["label"].tolist())
+    for lab, part in df.groupby("label"):
+        idxs = np.array(part.index.to_list(), dtype=np.int64)
+        rng.shuffle(idxs)
+        n = len(idxs)
+        n_train = int(round(n * train_ratio))
+        n_val = int(round(n * val_ratio))
+        n_train = max(1, min(n_train, n - 2))
+        n_val = max(1, min(n_val, n - n_train - 1))
+        n_test = n - n_train - n_val
+        if n_test < 1:
+            n_test = 1
+            if n_train > n_val:
+                n_train -= 1
+            else:
+                n_val -= 1
+        train_idx.extend(list(idxs[:n_train]))
+        val_idx.extend(list(idxs[n_train : n_train + n_val]))
+        test_idx.extend(list(idxs[n_train + n_val :]))
+        if n_train < 1 or n_val < 1 or n_test < 1:
+            raise RuntimeError(f"Strict split failed for class {lab}: train={n_train}, val={n_val}, test={n_test}")
+    tr = df.loc[train_idx].reset_index(drop=True)
+    va = df.loc[val_idx].reset_index(drop=True)
+    te = df.loc[test_idx].reset_index(drop=True)
+    for name, part in (("train", tr), ("val", va), ("test", te)):
+        miss = sorted(labels_total - set(part["label"].tolist()))
+        if miss:
+            raise RuntimeError(f"Strict split failed: missing classes in {name}: {miss}")
+    warnings: List[str] = []
+    if (df["subject_id"].notna() | df["session_id"].notna()).any():
+        warnings.append(
+            "group-aware split not fully enforced yet; strict split uses deterministic stratified rows."
+        )
+    return tr, va, te, warnings
+
+
 # --- main consolidation ---------------------------------------------------------
 
 def _rows_to_dataframe(rows: List[Row]) -> pd.DataFrame:
@@ -599,6 +690,7 @@ def _write_markdown(
     n_after: int,
     n_drop: int,
     w: List[str],
+    quality_drops: Optional[Dict[str, int]] = None,
 ) -> None:
     lines = [
         "# Data consolidation report",
@@ -618,6 +710,11 @@ def _write_markdown(
             "",
         ]
     )
+    if quality_drops:
+        lines.extend(["## Quality filtering", ""])
+        for k, v in sorted(quality_drops.items()):
+            lines.append(f"- **{k}**: {int(v)}")
+        lines.append("")
     if w:
         lines.append("## Warnings / split notes\n")
         for x in w:
@@ -626,7 +723,17 @@ def _write_markdown(
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def consolidate(data_root: Path, out_dir: Path) -> None:
+def consolidate(
+    data_root: Path,
+    out_dir: Path,
+    *,
+    min_confidence: float,
+    max_occlusion: float,
+    min_landmark_completeness: float,
+    strict_split: bool,
+) -> None:
+    data_root = resolve_repo_path(data_root)
+    out_dir = resolve_repo_path(out_dir)
     if not data_root.is_dir():
         print(f"error: data root not found: {data_root}", file=sys.stderr)
         sys.exit(1)
@@ -641,16 +748,24 @@ def consolidate(data_root: Path, out_dir: Path) -> None:
         sibling_core / "coordinates.csv",
         sibling_core / "data" / "csv" / "confirmed_labels.csv",
         sibling_core / "confirmed_labels.csv",
-        Path("datasets/processed/external/external_normalized.csv"),
+        ROOT / "datasets" / "processed" / "external" / "external_normalized.csv",
+        ROOT / "datasets" / "csv_dataset" / "confirmed_labels.csv",
+        ROOT / "datasets" / "csv_dataset" / "coordinates_legacy_subset.csv",
     ]
     for p in extra_csvs:
         if p.exists():
             if p.name == "video_keypoints.csv":
                 rows.extend(list(_rows_from_part4_csv(p)))
-            elif p.name == "coordinates.csv":
+            elif p.name in ("coordinates.csv", "coordinates_legacy_subset.csv"):
                 rows.extend(list(_rows_from_coordinates_csv(p)))
             else:
                 rows.extend(list(_rows_from_confirmed_csv(p)))
+    rows, quality_drops = _quality_filter_rows(
+        rows,
+        min_confidence=min_confidence,
+        max_occlusion=max_occlusion,
+        min_landmark_completeness=min_landmark_completeness,
+    )
     n_before = len(rows)
     rows, n_drop = _deduplicate(rows)
     n_after = len(rows)
@@ -672,7 +787,10 @@ def consolidate(data_root: Path, out_dir: Path) -> None:
             indent=2,
         )
     df["label_id"] = df["label"].map(label_map)
-    tr, va, te, wlist = _safe_stratify(df)
+    if strict_split:
+        tr, va, te, wlist = _strict_split(df)
+    else:
+        tr, va, te, wlist = _safe_stratify(df)
     stats: Dict[str, Any] = {
         "train": {str(k): int(v) for k, v in tr["label"].value_counts().items()} if len(tr) else {},
         "val": {str(k): int(v) for k, v in va["label"].value_counts().items()} if len(va) else {},
@@ -691,7 +809,7 @@ def consolidate(data_root: Path, out_dir: Path) -> None:
 
     for name, part in (("train", tr), ("val", va), ("test", te)):
         pack_frame(part).to_parquet(out_dir / f"{name}.parquet", index=False)
-    _write_markdown(out_dir, by_src, n_before, n_after, n_drop, wlist)
+    _write_markdown(out_dir, by_src, n_before, n_after, n_drop, wlist, quality_drops=quality_drops)
     print(
         f"Wrote {out_dir}: train={len(tr)} val={len(va)} test={len(te)} (dedup dropped {n_drop})",
         file=sys.stderr,
@@ -712,12 +830,27 @@ def parse_args() -> argparse.Namespace:
         default=Path("datasets/processed/consolidated/albsl_dataset_v2"),
         help="Output directory for parquet and reports",
     )
+    ap.add_argument("--min-confidence", type=float, default=0.10, help="Drop rows below this confidence when present.")
+    ap.add_argument("--max-occlusion", type=float, default=0.95, help="Drop rows above this occlusion when present.")
+    ap.add_argument("--min-landmark-completeness", type=float, default=1.0, help="Required finite landmark ratio [0-1].")
+    ap.add_argument(
+        "--allow-fallback-split",
+        action="store_true",
+        help="Allow legacy fallback split behavior instead of strict deterministic split.",
+    )
     return ap.parse_args()
 
 
 def main() -> None:
     a = parse_args()
-    consolidate(a.data_root, a.out_dir)
+    consolidate(
+        a.data_root,
+        a.out_dir,
+        min_confidence=float(a.min_confidence),
+        max_occlusion=float(a.max_occlusion),
+        min_landmark_completeness=float(a.min_landmark_completeness),
+        strict_split=not bool(a.allow_fallback_split),
+    )
 
 
 if __name__ == "__main__":
